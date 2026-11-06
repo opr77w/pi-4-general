@@ -1,0 +1,8 @@
+[Unit]
+Description=BirdNET standby: pull config and DB snapshot from pi-4-birdnet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/birdnet-standby-sync

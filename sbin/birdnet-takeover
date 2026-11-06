@@ -1,0 +1,36 @@
+#!/bin/bash
+# Promote pi-4-general to the live BirdNET-Go node (warm standby takeover). Added 06/11/2026.
+# Before running: stop BirdNET-Go on pi-4-birdnet if it is up, then move the USB sound card and Clippy here.
+# Usage: sudo birdnet-takeover [--force]   (--force skips the check that the primary's UI is down)
+set -uo pipefail
+APP=/srv/birdnet-go-app; FORCE=${1:-}
+die(){ echo "birdnet-takeover: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "run with sudo"
+systemctl is-active --quiet birdnet-go && die "BirdNET-Go is already running here"
+if curl -s -o /dev/null -m 5 http://192.168.4.37:8080/ && [ "$FORCE" != "--force" ]; then
+  die "pi-4-birdnet's BirdNET-Go still answers on :8080. Stop it first (sudo systemctl stop birdnet-go on pi-4-birdnet), or pass --force."
+fi
+lsusb | grep -q '0d8c:0014' || die "USB sound card (C-Media 0d8c:0014) not found. Move the dongle and Clippy here first."
+echo "1/4 Final sync attempt (fine if the primary is down)"; /usr/local/sbin/birdnet-standby-sync || echo "  sync failed; using the last good snapshot"
+[ -f "$APP/db-snapshot/birdnet.db" ] || die "no DB snapshot at $APP/db-snapshot"
+echo "2/4 Promoting DB snapshot to live DB"
+ts=$(date +%Y%m%d-%H%M%S)
+for f in birdnet.db birdnet.db-wal birdnet.db-shm; do [ -f "$APP/data/$f" ] && mv "$APP/data/$f" "$APP/data/$f.pre-takeover-$ts"; done
+cp -a "$APP/db-snapshot/birdnet.db" "$APP/data/birdnet.db"; chown 1000:1000 "$APP/data/birdnet.db"
+echo "3/4 Starting BirdNET-Go"
+systemctl enable --now birdnet-go
+for i in $(seq 24); do curl -s -o /dev/null -w '%{http_code}' -m 3 http://localhost:8080/ | grep -qE '200|302' && break; sleep 5; done
+echo "4/4 Checks"
+curl -s -o /dev/null -w '  UI http %{http_code}\n' -m 5 http://localhost:8080/
+grep -h state /proc/asound/card*/pcm0c/sub0/status 2>/dev/null | sed 's/^/  capture /'
+echo "  last detection in DB: $(sqlite3 "$APP/data/birdnet.db" "select strftime('%d/%m %H:%M',max(detected_at),'unixepoch') from detections;")"
+cat <<'MSG'
+
+Manual repoint (192.168.4.37 -> 192.168.7.229):
+  - pi-0-frame: Fugleramme BirdNET-Go URL
+  - Home Assistant: any dashboard cards or links to http://192.168.4.37:8080 (MQTT sensors follow automatically)
+  - Bookmarks / Fugleramme web kiosk
+Clips are written to this Pi's SD card (/srv/birdnet-go-app/external/clips) during a takeover.
+To hand back: sudo birdnet-handback
+MSG
+/usr/local/sbin/pi-notify warn "BirdNET takeover ($(hostname -s))" "pi-4-general is now the live BirdNET-Go node. Repoint pi-0-frame and HA links." || true

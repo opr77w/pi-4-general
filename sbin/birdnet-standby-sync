@@ -1,0 +1,21 @@
+#!/bin/bash
+# Daily pull of BirdNET-Go config and the consistent DB snapshot from pi-4-birdnet (added 06/11/2026).
+# Runs 12:30, after pi-4-birdnet's 11:45 birdnet-db-snapshot. Read-only key: rrsync -ro rooted at /srv/birdnet-go-app on the primary.
+# Skips if BirdNET-Go is running here (standby has taken over), so a takeover is never overwritten.
+set -uo pipefail
+HOST=$(hostname -s)
+SRC=pi@192.168.4.37; DST=/srv/birdnet-go-app; STATE=/var/lib/birdnet-standby
+SSH="ssh -i /home/pi/.ssh/birdnet_sync_ed25519 -o BatchMode=yes -o UserKnownHostsFile=/home/pi/.ssh/known_hosts -o ConnectTimeout=15"
+notify(){ /usr/local/sbin/pi-notify "$@" || true; }
+fail(){ echo "birdnet-standby-sync: $1"; notify fail "BirdNET standby sync FAILED ($HOST)" "$1"; exit 1; }
+mkdir -p "$STATE"
+if systemctl is-active --quiet birdnet-go; then echo "birdnet-standby-sync: BirdNET-Go is running here (takeover), skipping"; exit 0; fi
+rsync -rlt --delete --exclude 'hls/' --exclude 'sessions/' --exclude 'diagnostics/' -e "$SSH" "$SRC:config/" "$DST/config/" || fail "config rsync failed (rc $?)."
+rsync -t -e "$SSH" "$SRC:db-snapshot/birdnet.db" "$DST/db-snapshot/birdnet.db.tmp" || fail "DB snapshot rsync failed (rc $?)."
+[ "$(sqlite3 "$DST/db-snapshot/birdnet.db.tmp" 'PRAGMA integrity_check;')" = ok ] || fail "Integrity check failed on pulled DB snapshot."
+mv -f "$DST/db-snapshot/birdnet.db.tmp" "$DST/db-snapshot/birdnet.db"
+chown -R 1000:1000 "$DST/config" "$DST/db-snapshot"
+age=$(( $(date +%s) - $(stat -c %Y "$DST/db-snapshot/birdnet.db") ))
+[ "$age" -lt $((36*3600)) ] || notify warn "BirdNET standby DB is stale ($HOST)" "Primary snapshot is $((age/3600))h old; check birdnet-db-snapshot on pi-4-birdnet."
+date +%s > "$STATE/sync_last_success"
+echo "birdnet-standby-sync: ok, $(sqlite3 "$DST/db-snapshot/birdnet.db" 'select count(*) from detections;') detections, snapshot age $((age/60))m"

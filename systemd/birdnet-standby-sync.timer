@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily BirdNET standby sync from pi-4-birdnet
+
+[Timer]
+OnCalendar=*-*-* 12:30
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
